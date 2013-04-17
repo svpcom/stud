@@ -830,7 +830,7 @@ char *prepare_xff_line(struct sockaddr* ai_addr) {
         struct sockaddr_in* addr = (struct sockaddr_in*)ai_addr;
         size_t res = snprintf(xff_line,
                 sizeof(xff_line),
-                "X-Forwarded-For: %s\r\n",
+                "X-Forwarded-For: %s\r\nX-Forwarded-Proto: https\r\n",
                 inet_ntoa(addr->sin_addr));
         assert(res < sizeof(xff_line));
         return xff_line;
@@ -840,7 +840,7 @@ char *prepare_xff_line(struct sockaddr* ai_addr) {
       inet_ntop(AF_INET6,&(addr->sin6_addr),tcp6_address_string,INET6_ADDRSTRLEN);
       size_t res = snprintf(xff_line,
                             sizeof(xff_line),
-                            "X-Forwarded-For:%s\r\n",
+                            "X-Forwarded-For: %s\r\nX-Forwarded-Proto: https\r\n",
                             tcp6_address_string);
       assert(res < sizeof(xff_line));
       return xff_line;
