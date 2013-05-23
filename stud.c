@@ -111,6 +111,7 @@ static unsigned char shared_secret[SHA_DIGEST_LENGTH];
 long openssl_version;
 int create_workers;
 stud_config *CONFIG;
+char **globalv;
 
 static char tcp_proxy_line[128] = "";
 
@@ -879,6 +880,8 @@ static int create_main_socket() {
     setnonblocking(s);
 
     if (bind(s, ai->ai_addr, ai->ai_addrlen)) {
+        printf("REUSING 4\n");
+        return 4;
         fail("{bind-socket}");
     }
 
@@ -893,6 +896,7 @@ static int create_main_socket() {
 
     freeaddrinfo(ai);
     listen(s, CONFIG->BACKLOG);
+    printf("LISTENING ON %d\n", s);
 
     return s;
 }
@@ -1806,6 +1810,32 @@ static void sigh_terminate (int __attribute__ ((unused)) signo) {
     exit(0);
 }
 
+static void sigh_reload (int __attribute__ ((unused)) signo) {
+    /* don't create any more children */
+    create_workers = 0;
+
+    /* are we the master? */
+    if (getpid() == master_pid) {
+        LOG("{core} Received signal %d, reloading.\n", signo);
+        /* kill all children */
+        int i;
+        for (i = 0; i < CONFIG->NCORES; i++) {
+            /* LOG("Stopping worker pid %d.\n", child_pids[i]); */
+            if (child_pids[i] > 1 && kill(child_pids[i], SIGHUP) != 0) {
+                ERR("{core} Unable to send SIGHUP to worker pid %d: %s\n", child_pids[i], strerror(errno));
+            }
+        }
+        /* LOG("Shutdown complete.\n"); */
+        execv("./stud", globalv);
+    } else {
+        ev_unref (loop);
+        ev_unref (loop);
+    }
+
+    /* this is it, we're done... */
+    //exit(0);
+}
+
 void init_signals() {
     struct sigaction act;
 
@@ -1835,6 +1865,11 @@ void init_signals() {
     }
     if (sigaction(SIGTERM, &act, NULL) < 0) {
         ERR("Unable to register SIGTERM signal handler: %s\n", strerror(errno));
+        exit(1);
+    }
+    act.sa_handler = sigh_reload;
+    if (sigaction(SIGHUP, &act, NULL) < 0) {
+        ERR("Unable to register SIGHUP signal handler: %s\n", strerror(errno));
         exit(1);
     }
 }
@@ -1913,6 +1948,7 @@ void openssl_check_version() {
 /* Process command line args, create the bound socket,
  * spawn child (worker) processes, and respawn if any die */
 int main(int argc, char **argv) {
+    globalv = argv;
     // initialize configuration
     CONFIG = config_new();
 
