@@ -44,6 +44,7 @@ struct __stud_config {
     int WRITE_PROXY_LINE;
     int WRITE_XFF_LINE;
     int PROXY_PROXY_LINE;
+    int READ_PROXY_LINE;
     char *CHROOT;
     uid_t UID;
     gid_t GID;

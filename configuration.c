@@ -46,6 +46,7 @@
 #define CFG_WRITE_IP "write-ip"
 #define CFG_WRITE_PROXY "write-proxy"
 #define CFG_WRITE_XFF "write-xff"
+#define CFG_READ_PROXY "read-proxy"
 #define CFG_PEM_FILE "pem-file"
 #define CFG_PROXY_PROXY "proxy-proxy"
 
@@ -118,6 +119,7 @@ stud_config * config_new (void) {
   r->WRITE_PROXY_LINE   = 0;
   r->WRITE_XFF_LINE     = 0;
   r->PROXY_PROXY_LINE   = 0;
+  r->READ_PROXY_LINE    = 0;
   r->CHROOT             = NULL;
   r->UID                = 0;
   r->GID                = 0;
@@ -692,6 +694,9 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
   else if (strcmp(k, CFG_PROXY_PROXY) == 0) {
     r = config_param_val_bool(v, &cfg->PROXY_PROXY_LINE);
   }
+  else if (strcmp(k, CFG_READ_PROXY) == 0) {
+    r = config_param_val_bool(v, &cfg->READ_PROXY_LINE);
+  }
   else if (strcmp(k, CFG_PEM_FILE) == 0) {
     if (v != NULL && strlen(v) > 0) {
       if (stat(v, &st) != 0) {
@@ -924,14 +929,19 @@ void config_print_usage_fd (char *prog, stud_config *cfg, FILE *out) {
   fprintf(out, "                             address in 4 (IPv4) or 16 (IPv6) octets little-endian\n");
   fprintf(out, "                             to backend before the actual data\n");
   fprintf(out, "                             (Default: %s)\n", config_disp_bool(cfg->WRITE_IP_OCTET));
-  fprintf(out, "      --write-proxy          Write HaProxy's PROXY (IPv4 or IPv6) protocol line\n" );
-  fprintf(out, "                             before actual data\n");
+  fprintf(out, "      --write-proxy          Write HAProxy's PROXY (IPv4 or IPv6) protocol line\n" );
+  fprintf(out, "                             to the backend before actual data\n");
   fprintf(out, "                             (Default: %s)\n", config_disp_bool(cfg->WRITE_PROXY_LINE));
   fprintf(out, "      --write-xff            Write X-Forwarded-For header before actual data\n" );
   fprintf(out, "                             (Default: %s)\n", config_disp_bool(cfg->WRITE_XFF_LINE));
   fprintf(out, "      --proxy-proxy          Proxy HaProxy's PROXY (IPv4 or IPv6) protocol line\n" );
   fprintf(out, "                             before actual data\n");
   fprintf(out, "                             (Default: %s)\n", config_disp_bool(cfg->PROXY_PROXY_LINE));
+  fprintf(out, "      --read-proxy           Read HAProxy's PROXY (IPv4 or IPv6) protocol line\n" );
+  fprintf(out, "                             before actual data.  This address will be sent to\n");
+  fprintf(out, "                             the backend if one of --write-ip or --write-proxy\n");
+  fprintf(out, "                             is specified.\n");
+  fprintf(out, "                             (Default: %s)\n", config_disp_bool(cfg->READ_PROXY_LINE));
   fprintf(out, "\n");
   fprintf(out, "  -t  --test                 Test configuration and exit\n");
   fprintf(out, "  -V  --version              Print program version and exit\n");
@@ -1109,7 +1119,7 @@ void config_print_default (FILE *fd, stud_config *cfg) {
   fprintf(fd, FMT_STR, CFG_WRITE_IP, config_disp_bool(cfg->WRITE_IP_OCTET));
   fprintf(fd, "\n");
 
-  fprintf(fd, "# Report client address using SENDPROXY protocol, see\n");
+  fprintf(fd, "# Report client address using HAProxy PROXY protocol line, see\n");
   fprintf(fd, "# http://haproxy.1wt.eu/download/1.5/doc/proxy-protocol.txt\n");
   fprintf(fd, "# for details.\n");
   fprintf(fd, "#\n");
@@ -1131,6 +1141,15 @@ void config_print_default (FILE *fd, stud_config *cfg) {
   fprintf(fd, "#\n");
   fprintf(fd, "# type: boolean\n");
   fprintf(fd, FMT_STR, CFG_PROXY_PROXY, config_disp_bool(cfg->PROXY_PROXY_LINE));
+  fprintf(fd, "\n");
+
+  fprintf(fd, "# Read client address using HAProxy PROXY protocol line, see\n");
+  fprintf(fd, "# http://haproxy.1wt.eu/download/1.5/doc/proxy-protocol.txt\n");
+  fprintf(fd, "# for details. This address will be reported to the backend\n");
+  fprintf(fd, "# if one of %s or %s is specified.\n", CFG_WRITE_IP, CFG_WRITE_PROXY);
+  fprintf(fd, "#\n");
+  fprintf(fd, "# type: boolean\n");
+  fprintf(fd, FMT_STR, CFG_READ_PROXY, config_disp_bool(cfg->READ_PROXY_LINE));
   fprintf(fd, "\n");
 
   fprintf(fd, "# EOF\n");
@@ -1179,9 +1198,12 @@ void config_parse_cli(int argc, char **argv, stud_config *cfg) {
     { CFG_DAEMON, 0, &cfg->DAEMONIZE, 1 },
     { CFG_WRITE_IP, 0, &cfg->WRITE_IP_OCTET, 1 },
     { CFG_WRITE_PROXY, 0, &cfg->WRITE_PROXY_LINE, 1 },
+ 
     { CFG_WRITE_XFF, 0, &cfg->WRITE_XFF_LINE, 1 },
     { CFG_PROXY_PROXY, 0, &cfg->PROXY_PROXY_LINE, 1 },
 
+    { CFG_READ_PROXY, 0, &cfg->READ_PROXY_LINE, 1 },
+ 
     { "test", 0, NULL, 't' },
     { "version", 0, NULL, 'V' },
     { "help", 0, NULL, 'h' },
