@@ -996,7 +996,7 @@ void config_print_default (FILE *fd, stud_config *cfg) {
   fprintf(fd, FMT_QSTR, CFG_PEM_FILE, "");
   fprintf(fd, "\n");
   fprintf(fd, "# Password for private key in PEM file OPTIONAL.\n");
-  fprintf(fd, "# pem-keypass = \"mypassword\"\n");
+  fprintf(fd, "# %s = \"mypassword\"\n", CFG_PEM_KEYPASS);
   fprintf(fd, "\n");
 
   fprintf(fd, "# SSL protocol.\n");
