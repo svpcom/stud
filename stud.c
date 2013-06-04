@@ -1361,15 +1361,6 @@ static void client_handshake(struct ev_loop *loop, ev_io *w, int revents) {
     int t;
     proxystate *ps = (proxystate *)w->data;
 
-    /*
-    if (CONFIG->READ_PROXY_LINE) {
-        if (client_handshake_haproxy(w)) {
-            // error
-            return;
-        }
-    }
-    */
-
     t = SSL_do_handshake(ps->ssl);
     if (t == 1) {
         end_handshake(ps);
