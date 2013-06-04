@@ -1101,53 +1101,6 @@ static void clear_write(struct ev_loop *loop, ev_io *w, int revents) {
 
 static void start_handshake(proxystate *ps, int err);
 
-static void write_proxy_or_ip(proxystate *ps) {
-    char tcp6_address_string[INET6_ADDRSTRLEN];
-    size_t written = 0;
-    if (CONFIG->WRITE_PROXY_LINE) {
-        char *ring_pnt = ringbuffer_write_ptr(&ps->ring_down);
-        assert(ps->remote_ip.ss_family == AF_INET ||
-            ps->remote_ip.ss_family == AF_INET6);
-        if(ps->remote_ip.ss_family == AF_INET) {
-            struct sockaddr_in* addr = (struct sockaddr_in*)&ps->remote_ip;
-            written = snprintf(ring_pnt,
-                RING_DATA_LEN,
-                tcp_proxy_line,
-                "TCP4",
-                inet_ntoa(addr->sin_addr),
-                ntohs(addr->sin_port));
-        }
-        else if (ps->remote_ip.ss_family == AF_INET6) {
-            struct sockaddr_in6* addr = (struct sockaddr_in6*)&ps->remote_ip;
-            inet_ntop(AF_INET6,&(addr->sin6_addr),tcp6_address_string,INET6_ADDRSTRLEN);
-            written = snprintf(ring_pnt,
-                RING_DATA_LEN,
-                tcp_proxy_line,
-                "TCP6",
-                tcp6_address_string,
-                ntohs(addr->sin6_port));
-        }
-        ringbuffer_write_append(&ps->ring_down, written);
-        ev_io_start(loop, &ps->ev_w_down);
-    }
-    else if (CONFIG->WRITE_IP_OCTET) {
-        char *ring_pnt = ringbuffer_write_ptr(&ps->ring_down);
-        assert(ps->remote_ip.ss_family == AF_INET ||
-            ps->remote_ip.ss_family == AF_INET6);
-        *ring_pnt++ = (unsigned char) ps->remote_ip.ss_family;
-        if (ps->remote_ip.ss_family == AF_INET6) {
-            memcpy(ring_pnt, &((struct sockaddr_in6 *) &ps->remote_ip)
-                ->sin6_addr.s6_addr, 16U);
-            ringbuffer_write_append(&ps->ring_down, 1U + 16U);
-        } else {
-            memcpy(ring_pnt, &((struct sockaddr_in *) &ps->remote_ip)
-                ->sin_addr.s_addr, 4U);
-            ringbuffer_write_append(&ps->ring_down, 1U + 4U);
-        }
-        ev_io_start(loop, &ps->ev_w_down);
-    }
-}
-
 /* Continue/complete the asynchronous connect() before starting data transmission
  * between front/backend */
 static void handle_connect(struct ev_loop *loop, ev_io *w, int revents) {
@@ -1277,58 +1230,16 @@ static void end_handshake(proxystate *ps) {
         ev_io_start(loop, &ps->ev_w_ssl);
 }
 
-static void client_proxy_proxy(struct ev_loop *loop, ev_io *w, int revents) {
-    (void) revents;
-    int t;
-    char *proxy = tcp_proxy_line, *end = tcp_proxy_line + sizeof(tcp_proxy_line);
-    proxystate *ps = (proxystate *)w->data;
-    BIO *b = SSL_get_rbio(ps->ssl);
-
-    // Copy characters one-by-one until we hit a \n or an error
-    while (proxy != end && (t = BIO_read(b, proxy, 1)) == 1) {
-        if (*proxy++ == '\n') break;
-    }
-
-    if (proxy == end) {
-        LOG("{client} Unexpectedly long PROXY line. Perhaps a malformed request?");
-        shutdown_proxy(ps, SHUTDOWN_SSL);
-    }
-    else if (t == 1) {
-        if (ringbuffer_is_full(&ps->ring_ssl2clear)) {
-            LOG("{client} Error writing PROXY line");
-            shutdown_proxy(ps, SHUTDOWN_SSL);
-            return;
-        }
-
-        char *ring = ringbuffer_write_ptr(&ps->ring_ssl2clear);
-        memcpy(ring, tcp_proxy_line, proxy - tcp_proxy_line);
-        ringbuffer_write_append(&ps->ring_ssl2clear, proxy - tcp_proxy_line);
-
-        // Finished reading the PROXY header
-        if (*(proxy - 1) == '\n') {
-            ev_io_stop(loop, &ps->ev_proxy);
-
-            // Start the real handshake
-            start_handshake(ps, SSL_ERROR_WANT_READ);
-        }
-    }
-    else if (!BIO_should_retry(b)) {
-        LOG("{client} Unexpected error reading PROXY line");
-        shutdown_proxy(ps, SHUTDOWN_SSL);
-    }
-}
-
-#define HAPROXY_MIN_SIZE 32
-#define HAPROXY_MAX_SIZE 120
-
 static int parse_haproxy_line(proxystate *ps, const char *buf) {
     int t;
     int protocol;
     int af;
-    // buf is at most HAPROXY_MAX_SIZE+1 bytes and terminated, so it is safe to
-    // sscanf into buffers of that size or larger
-    char addr1[HAPROXY_MAX_SIZE+1];
-    char addr2[HAPROXY_MAX_SIZE+1];
+	 int bufsize = strlen(buf);
+    // rather than use constants to define the size of the proxy line I'm going
+    // to base the size of the address buffers on the size of the buffer being
+    // passed in.
+    char addr1[bufsize + 1];
+    char addr2[bufsize + 1];
     short int port1;
     short int port2;
     t = sscanf(buf, "PROXY TCP%d %s %s %hu %hu", &protocol, addr1, addr2, &port1, &port2);
@@ -1356,53 +1267,68 @@ static int parse_haproxy_line(proxystate *ps, const char *buf) {
     return 0;
 }
 
-static int client_handshake_haproxy(ev_io *w) {
-    // Possible issue: if TCP fragment size is smaller than the length of the
-    // HAProxy PROXY line (at most 120 bytes), then this will fail.  Since this
-    // only applies to internal packets between HAProxy and stud, this should be
-    // acceptable and avoidable.
+/*
+ * Handle PROXY protocol line either for sending it on (proxy-proxy) or ingesting
+ * it and re-assigning remote-ip on the proxystate struct(read-proxy).
+ */
+static void client_proxy_proxy(struct ev_loop *loop, ev_io *w, int revents) {
+    (void) revents;
+    int t;
+    char *proxy = tcp_proxy_line, *end = tcp_proxy_line + sizeof(tcp_proxy_line);
     proxystate *ps = (proxystate *)w->data;
-    if (!ps->read_proxy_line) {
-        int fd = w->fd;
-        int len=0;
-        char buf[HAPROXY_MAX_SIZE+1];
-        int t = recv(fd, buf, HAPROXY_MIN_SIZE, 0);
-        int terminated = 0;
-        if (t == HAPROXY_MIN_SIZE) {
-            // we read the first data, how much more is needed
-            len = t;
-            // This seems inefficient, but besides ugly partial parsing to guess
-            // how many more bytes are needed, I am unsure what else to do.
-            // Perhaps there's some way to just read all that is waiting and
-            // push the remainder into the SSL state's buffer somehow?
-            while (t>0 && len < HAPROXY_MAX_SIZE && !terminated) {
-                t = recv(fd, &buf[len], 1, 0);
-                len += t;
-                terminated = (buf[len-2]=='\r' && buf[len-1]=='\n');
+    BIO *b = SSL_get_rbio(ps->ssl);
+
+    // Copy characters one-by-one until we hit a \n or an error
+    while (proxy != end && (t = BIO_read(b, proxy, 1)) == 1) {
+        if (*proxy++ == '\n') break;
+    }
+
+    if (proxy == end) {
+        LOG("{client} Unexpectedly long PROXY line. Perhaps a malformed request?");
+        shutdown_proxy(ps, SHUTDOWN_SSL);
+    }
+    else if (t == 1) {
+        /*
+			* we only write out the proxy data if we're in proxy-proxy mode instead of 
+			* read-proxy mode.
+			*/
+        if(!CONFIG->READ_PROXY_LINE) {
+            if (ringbuffer_is_full(&ps->ring_ssl2clear)) {
+                LOG("{client} Error writing PROXY line");
+                shutdown_proxy(ps, SHUTDOWN_SSL);
+                return;
             }
-        }
-        if (terminated) {
-            buf[len] = 0; // terminate
-            if (parse_haproxy_line(ps, buf)) {
-                LOG("{client} Error parsing HAProxy line\n");
-                shutdown_proxy(ps, SHUTDOWN_DOWN);
-                return 1;
-            }
-            ps->read_proxy_line = 1;
-            write_proxy_or_ip(ps);
-        } else if (t == 0) {
-            LOG("{client} Connection closed (in HAProxy read)\n");
-            shutdown_proxy(ps, SHUTDOWN_DOWN);
-            return 1;
+
+            char *ring = ringbuffer_write_ptr(&ps->ring_ssl2clear);
+            memcpy(ring, tcp_proxy_line, proxy - tcp_proxy_line);
+            ringbuffer_write_append(&ps->ring_ssl2clear, proxy - tcp_proxy_line);
         } else {
-            // t == -1 or t < initial read size
-            LOG("{client} Read insufficient bytes for HAProxy read\n");
-            shutdown_proxy(ps, SHUTDOWN_DOWN);
-            return 1;
+           /*
+				* parse the PROXY line (and re-assign the source ip to the relevant ip 
+				* inside the PROXY line
+				*/
+           if(parse_haproxy_line(ps, tcp_proxy_line) != 0) {
+              LOG("{client} Error parsing PROXY line");
+              shutdown_proxy(ps, SHUTDOWN_SSL);
+              return;
+           }
+        }
+
+
+        // Finished reading the PROXY header
+        if (*(proxy - 1) == '\n') {
+            ev_io_stop(loop, &ps->ev_proxy);
+
+            // Start the real handshake
+            start_handshake(ps, SSL_ERROR_WANT_READ);
         }
     }
-    return 0;
+    else if (!BIO_should_retry(b)) {
+        LOG("{client} Unexpected error reading PROXY line");
+        shutdown_proxy(ps, SHUTDOWN_SSL);
+    }
 }
+
 
 /* The libev I/O handler during the OpenSSL handshake phase.  Basically, just
  * let OpenSSL do what it likes with the socket and obey its requests for reads
@@ -1412,12 +1338,14 @@ static void client_handshake(struct ev_loop *loop, ev_io *w, int revents) {
     int t;
     proxystate *ps = (proxystate *)w->data;
 
+    /*
     if (CONFIG->READ_PROXY_LINE) {
         if (client_handshake_haproxy(w)) {
             // error
             return;
         }
     }
+    */
 
     t = SSL_do_handshake(ps->ssl);
     if (t == 1) {
@@ -1641,7 +1569,7 @@ static void handle_accept(struct ev_loop *loop, ev_io *w, int revents) {
     /* Link back proxystate to SSL state */
     SSL_set_app_data(ssl, ps);
 
-    if (CONFIG->PROXY_PROXY_LINE) {
+    if (CONFIG->PROXY_PROXY_LINE || CONFIG->READ_PROXY_LINE) {
         ev_io_start(loop, &ps->ev_proxy);
     }
     else {
