@@ -49,6 +49,7 @@
 #define CFG_READ_PROXY "read-proxy"
 #define CFG_PEM_FILE "pem-file"
 #define CFG_PROXY_PROXY "proxy-proxy"
+#define CFG_PEM_KEYPASS "pem-keypass"
 
 #ifdef USE_SHARED_CACHE
   #define CFG_SHARED_CACHE "shared-cache"
@@ -132,6 +133,7 @@ stud_config * config_new (void) {
   r->CIPHER_SUITE       = NULL;
   r->ENGINE             = NULL;
   r->BACKLOG            = 100;
+  r->PEM_KEYPASS			= NULL;
 
 #ifdef USE_SHARED_CACHE
   r->SHARED_CACHE       = 0;
@@ -175,6 +177,7 @@ void config_destroy (stud_config *cfg) {
   }
   if (cfg->CIPHER_SUITE != NULL) free(cfg->CIPHER_SUITE);
   if (cfg->ENGINE != NULL) free(cfg->ENGINE);
+  if (cfg->PEM_KEYPASS != NULL) free(cfg->PEM_KEYPASS);
 
 #ifdef USE_SHARED_CACHE
   if (cfg->SHCUPD_IP != NULL) free(cfg->SHCUPD_IP);
@@ -712,6 +715,15 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
         cert->NEXT = cfg->CERT_FILES;
         cfg->CERT_FILES = cert;
       }
+    }
+  }
+  else if (strcmp(k, CFG_PEM_KEYPASS) == 0) {
+    // this should only be null if we haven't hit the value yet.
+    // if we hit it a second time it's an error
+    if (cfg->PEM_KEYPASS == NULL) {
+      config_assign_str(&cfg->PEM_KEYPASS, v);
+    } else {
+       config_error_set("Duplicate PEM private key passwords");
     }
   }
   else {
