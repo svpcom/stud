@@ -163,16 +163,17 @@ typedef struct proxystate {
     int fd_up;                          /* Upstream (client) socket */
     int fd_down;                        /* Downstream (backend) socket */
 
-    int want_shutdown:1;                /* Connection is half-shutdown */
-    int handshaked:1;                   /* Initial handshake happened */
     int clear_connected:1;              /* Clear stream is connected  */
-    int renegotiation:1;                /* Renegotation is occuring */
-
+   
     int sent_xff:1;                     /* Have sent X-Forwarded-For header */
+    int want_shutdown:1;  /* Connection is half-shutdown */
+    int handshaked:1;     /* Initial handshake happened */
+    int renegotiation:1;  /* Renegotation is occuring */
+    int read_proxy_line:1;/* Read the HAProxy line from upstream */
 
     SSL *ssl;                           /* OpenSSL SSL state */
 
-    struct sockaddr_storage remote_ip;  /* Remote ip returned from `accept` */
+    struct sockaddr_storage remote_ip;  /* Remote ip returned from `accept` or HAProxy line */
 } proxystate;
 
 #define LOG(...)                                            \
@@ -539,6 +540,24 @@ static int create_shcupd_socket() {
 
 #endif /*USE_SHARED_CACHE */
 
+/* 
+ * callback method for openssl config password handling, effectively just 
+ * copies the user data pointer contents to the buffer.  We pass the pointer
+ * to the config password entry in to the calling method
+ */
+int cfg_pw_callback(char *buf, int size, int rwflag, void *u) {
+   char *pw = (char*)u;
+   int pwlen = strlen(pw);
+   if (pwlen > size || pwlen <= 0)  {
+      LOG("(config file password callback) Invalid config file password entry.");
+      return 0;
+   }
+
+   memset(buf, '\0', size);
+   memcpy(buf, pw, size);
+   return strlen(pw);
+}
+
 RSA *load_rsa_privatekey(SSL_CTX *ctx, const char *file) {
     BIO *bio;
     RSA *rsa;
@@ -549,8 +568,13 @@ RSA *load_rsa_privatekey(SSL_CTX *ctx, const char *file) {
         return NULL;
     }
 
-    rsa = PEM_read_bio_RSAPrivateKey(bio, NULL,
+    if (CONFIG->PEM_KEYPASS != NULL) {
+       rsa = PEM_read_bio_RSAPrivateKey(bio, NULL, cfg_pw_callback,
+                                       (void*)CONFIG->PEM_KEYPASS);
+    } else {
+       rsa = PEM_read_bio_RSAPrivateKey(bio, NULL,
           ctx->default_passwd_callback, ctx->default_passwd_callback_userdata);
+    }
     BIO_free(bio);
 
     return rsa;
@@ -1229,6 +1253,47 @@ static void end_handshake(proxystate *ps) {
         ev_io_start(loop, &ps->ev_w_ssl);
 }
 
+static int parse_haproxy_line(proxystate *ps, const char *buf) {
+    int t;
+    int protocol;
+    int af;
+	 int bufsize = strlen(buf);
+    // rather than use constants to define the size of the proxy line I'm going
+    // to base the size of the address buffers on the size of the buffer being
+    // passed in.
+    char addr1[bufsize + 1];
+    char addr2[bufsize + 1];
+    short int port1;
+    short int port2;
+    t = sscanf(buf, "PROXY TCP%d %s %s %hu %hu", &protocol, addr1, addr2, &port1, &port2);
+    if (t != 5)
+        return 1;
+    if (protocol == 4) {
+        struct sockaddr_in* addr = (struct sockaddr_in*)&ps->remote_ip;
+        af = AF_INET;
+        if (!inet_pton(af, addr1, &addr->sin_addr)) {
+            return 1;
+        }
+        addr->sin_port = htons(port1);
+        ps->remote_ip.ss_family = af;
+    } else if (protocol == 6) {
+        struct sockaddr_in6* addr = (struct sockaddr_in6*)&ps->remote_ip;
+        af = AF_INET6;
+        if (!inet_pton(af, addr1, &addr->sin6_addr)) {
+            return 1;
+        }
+        addr->sin6_port = htons(port1);
+        ps->remote_ip.ss_family = af;
+    } else {
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * Handle PROXY protocol line either for sending it on (proxy-proxy) or ingesting
+ * it and re-assigning remote-ip on the proxystate struct(read-proxy).
+ */
 static void client_proxy_proxy(struct ev_loop *loop, ev_io *w, int revents) {
     (void) revents;
     int t;
@@ -1246,15 +1311,32 @@ static void client_proxy_proxy(struct ev_loop *loop, ev_io *w, int revents) {
         shutdown_proxy(ps, SHUTDOWN_SSL);
     }
     else if (t == 1) {
-        if (ringbuffer_is_full(&ps->ring_ssl2clear)) {
-            LOG("{client} Error writing PROXY line");
-            shutdown_proxy(ps, SHUTDOWN_SSL);
-            return;
+        /*
+			* we only write out the proxy data if we're in proxy-proxy mode instead of 
+			* read-proxy mode.
+			*/
+        if(!CONFIG->READ_PROXY_LINE) {
+            if (ringbuffer_is_full(&ps->ring_ssl2clear)) {
+                LOG("{client} Error writing PROXY line");
+                shutdown_proxy(ps, SHUTDOWN_SSL);
+                return;
+            }
+
+            char *ring = ringbuffer_write_ptr(&ps->ring_ssl2clear);
+            memcpy(ring, tcp_proxy_line, proxy - tcp_proxy_line);
+            ringbuffer_write_append(&ps->ring_ssl2clear, proxy - tcp_proxy_line);
+        } else {
+           /*
+				* parse the PROXY line (and re-assign the source ip to the relevant ip 
+				* inside the PROXY line
+				*/
+           if(parse_haproxy_line(ps, tcp_proxy_line) != 0) {
+              LOG("{client} Error parsing PROXY line");
+              shutdown_proxy(ps, SHUTDOWN_SSL);
+              return;
+           }
         }
 
-        char *ring = ringbuffer_write_ptr(&ps->ring_ssl2clear);
-        memcpy(ring, tcp_proxy_line, proxy - tcp_proxy_line);
-        ringbuffer_write_append(&ps->ring_ssl2clear, proxy - tcp_proxy_line);
 
         // Finished reading the PROXY header
         if (*(proxy - 1) == '\n') {
@@ -1269,6 +1351,7 @@ static void client_proxy_proxy(struct ev_loop *loop, ev_io *w, int revents) {
         shutdown_proxy(ps, SHUTDOWN_SSL);
     }
 }
+
 
 /* The libev I/O handler during the OpenSSL handshake phase.  Basically, just
  * let OpenSSL do what it likes with the socket and obey its requests for reads
@@ -1469,6 +1552,7 @@ static void handle_accept(struct ev_loop *loop, ev_io *w, int revents) {
     ps->handshaked = 0;
     ps->renegotiation = 0;
     ps->sent_xff = 0;
+    ps->read_proxy_line = 0;
     ps->remote_ip = addr;
     ringbuffer_init(&ps->ring_clear2ssl);
     ringbuffer_init(&ps->ring_ssl2clear);
@@ -1499,7 +1583,7 @@ static void handle_accept(struct ev_loop *loop, ev_io *w, int revents) {
     /* Link back proxystate to SSL state */
     SSL_set_app_data(ssl, ps);
 
-    if (CONFIG->PROXY_PROXY_LINE) {
+    if (CONFIG->PROXY_PROXY_LINE || CONFIG->READ_PROXY_LINE) {
         ev_io_start(loop, &ps->ev_proxy);
     }
     else {
