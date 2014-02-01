@@ -60,7 +60,7 @@
 #include <openssl/err.h>
 #include <openssl/engine.h>
 #include <openssl/asn1.h>
-#include <ev.h>
+#include <libev/ev.h>
 
 #include "ringbuffer.h"
 #include "shctx.h"
@@ -1381,11 +1381,10 @@ static void client_handshake(struct ev_loop *loop, ev_io *w, int revents) {
         }
         else {
             // Try and get more detail on the error from the SSL
-            // error queue. ERR_error_string requires a char buffer
-            // of 120 bytes.
+            // error queue.
             unsigned long err_detail = ERR_get_error();
-            char err_msg[120];
-            ERR_error_string(err_detail, err_msg);
+            char err_msg[120];  //recommended size for ERR_error_string
+            ERR_error_string_n(err_detail, err_msg, sizeof(err_msg));
 
             LOG("{%s} Unexpected SSL error (in handshake): %d, %s\n", w->fd == ps->fd_up ? "client" : "backend", err, err_msg);
             shutdown_proxy(ps, SHUTDOWN_SSL);

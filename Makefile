@@ -3,12 +3,12 @@
 # USE_SHARED_CACHE   :   enable/disable a shared session cache (disabled by default)
 
 DESTDIR =
-PREFIX  = /usr/local
+PREFIX  = /usr
 BINDIR  = $(PREFIX)/bin
 MANDIR  = $(PREFIX)/share/man
 
-CFLAGS  += -O2 -g -std=c99 -fno-strict-aliasing -Wall -W -D_GNU_SOURCE -I/usr/local/include
-LDFLAGS += -lssl -lcrypto -lev -L/usr/local/lib
+CFLAGS  += -O2 -g -std=c99 -fno-strict-aliasing -Wall -W -D_GNU_SOURCE
+LDFLAGS += -lssl -lcrypto -lev
 OBJS    = stud.o ringbuffer.o configuration.o
 
 all: realall
