@@ -178,14 +178,14 @@ typedef struct proxystate {
 
 #define LOG(...)                                            \
     do {                                                    \
-      if (!CONFIG->QUIET) fprintf(stdout, __VA_ARGS__);     \
       if (CONFIG->SYSLOG) syslog(LOG_INFO, __VA_ARGS__);    \
+      else if (!CONFIG->QUIET) fprintf(stdout, __VA_ARGS__);\
     } while(0)
 
 #define ERR(...)                                            \
     do {                                                    \
-      fprintf(stderr, __VA_ARGS__);                         \
       if (CONFIG->SYSLOG) syslog(LOG_ERR, __VA_ARGS__);     \
+      else fprintf(stderr, __VA_ARGS__);                         \
     } while(0)
 
 #define NULL_DEV "/dev/null"
@@ -1032,7 +1032,7 @@ static void clear_read(struct ev_loop *loop, ev_io *w, int revents) {
             safe_enable_io(ps, &ps->ev_w_ssl);
     }
     else if (t == 0) {
-        LOG("{%s} Connection closed\n", fd == ps->fd_down ? "backend" : "client");
+        //LOG("{%s} Connection closed\n", fd == ps->fd_down ? "backend" : "client");
         shutdown_proxy(ps, SHUTDOWN_CLEAR);
     }
     else {
